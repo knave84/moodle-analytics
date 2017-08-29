@@ -1,0 +1,875 @@
+' KEATS Analytics v6.0.xlsm
+' last update 21/5/2015
+' ub: 2016/05/15
+
+' designed and developed by Dr Cat Grafton (cat.grafton@kcl.ac.uk / cat.grafton@gmail.com)
+' Aenderungen von Urs Brändle für deutsche Log-Files
+
+' 1. Load data from log file
+' 2. Make unique lists & name
+' 3. Remove unselected users
+
+' limits:
+    ' 500,000 entries
+    
+
+Option Explicit
+
+Public wksRawData As Worksheet
+Public wksLists As Worksheet
+Public wksTempData As Worksheet
+Public booRemove As Boolean             ' filter out users?
+Public booCancel As Boolean             ' cancel macro?
+Public dteStart As Date
+Public dteEnd As Date
+
+Dim startTimer1 As Date
+Dim endTimer1 As Date
+Dim booDates As Boolean                 ' update dates?
+Dim strTitle As String
+Dim strFile As String
+Sub showCalcSum()
+frmCalcSum.Show
+End Sub
+Sub getData()
+booDates = False
+runMain ("getData")         ' run macro to get data from file
+ThisWorkbook.Worksheets("Start").Range("A1").Value = strTitle & " from " & strFile
+End Sub
+
+Sub updateUsers()
+booDates = False
+runMain ("updateUsers")     ' run macro to update user list
+End Sub
+Sub updateDates()
+booDates = True
+runMain ("updateDates")     ' run macro to update user list
+End Sub
+
+
+Sub runMain(action)
+Dim booOpen As Boolean      ' result of OpenWorkbook - false if no file chosen
+Dim starttime As Date
+Dim endTime As Date
+Dim booExist As Boolean
+Dim i As Long
+
+' set up macro
+With Application
+    .ScreenUpdating = False
+    .EnableEvents = False
+    .DisplayAlerts = False
+End With
+
+' set defaults
+booExist = SheetExists("Lists")
+If booExist Then
+    Set wksLists = ThisWorkbook.Worksheets("Lists")
+End If
+booExist = SheetExists("Temp data")
+If booExist Then
+    Set wksTempData = ThisWorkbook.Worksheets("Temp data")
+End If
+booExist = SheetExists("Raw data")
+If booExist Then
+    Set wksRawData = ThisWorkbook.Worksheets("Raw data")
+End If
+
+ActiveWindow.Zoom = 100
+booRemove = False
+starttime = Now()
+booCancel = False
+
+' get data from file
+If action = "getData" Then
+    booOpen = OpenWorkbook                  ' opens filedialog for file selection, false if no file selected
+    If booOpen = False Then GoTo finish
+    Call uniqueLists                        ' list unique values in "Lists" and add names
+End If
+endTime = Now()
+'debug.Print ("Open workbook Start: " & startTime & " End: " & endTime)
+
+If booDates = False Then
+    frmRemoveUser.Show                          ' filter users via userform
+Else
+    frmFilterDates.Show
+End If
+
+If booCancel = True Then GoTo finish        ' stop macro if form cancelled
+
+' name filtered list of users
+ActiveWorkbook.Names.Add Name:="selectedUserNames", _
+    RefersToR1C1:=wksLists.Range("B2", wksLists.Range("B65536").End(xlUp))
+
+AnalyticsProgressBar.Show                   ' load progress bar (calls UpdateTempData)
+
+ThisWorkbook.RefreshAll
+ThisWorkbook.Worksheets("Start").Select
+
+'booCancel = Application.ScreenUpdating
+'Debug.Print ("booHide pre reset: " & booCancel)
+starttime = Timer()
+
+Call makeDateData                           ' update dates
+Call dayTimeDynamic.resetFilters            ' reset day/time filters
+Call defaultFilters
+ThisWorkbook.Worksheets("Pivots").Range("G7").Value = 1     ' show only top 10
+Call sortDynamic.btnSortUsers               ' update pivot data
+    ActiveSheet.Rows("34:1999").EntireRow.Hidden = True
+
+Call showIPdata                             ' update IP info
+endTime = Timer()
+Debug.Print ("reset: " & endTime - starttime)
+
+
+finish:
+' reset variables
+Set wksRawData = Nothing
+Set wksLists = Nothing
+Set wksTempData = Nothing
+
+With Application
+    .ScreenUpdating = True
+    .EnableEvents = True
+    .DisplayAlerts = True
+End With
+'debug.Print ("booCancel: " & booCancel)
+
+If booCancel = False Then
+    SheetExistsDelete ("Temp copy")
+    MsgBox "Complete"
+Else
+    MsgBox "Cancelled"
+    ' reinstate previous data
+End If
+
+'debug.Print ("2 Start: " & startTime & " End: " & endTime)
+
+End Sub
+
+
+Function OpenWorkbook() As Boolean
+' opens file dialog for selecting input file, copies 1st sheet to "Raw Data", parses date and time
+Dim fd As FileDialog
+Dim FileName As String
+Dim FileChosen As Long
+Dim booExist As Boolean
+Dim Wb1 As Workbook
+Dim intRows As Long
+Dim intCols As Long
+Dim rngCopy As Variant
+Dim ws As Worksheet
+Dim i As Long
+
+' select file
+Set fd = Application.FileDialog(msoFileDialogOpen)
+With fd
+    .Title = "Choose activity log"
+    .AllowMultiSelect = False
+    .InitialView = msoFileDialogViewList
+'show Excel workbooks and macro workbooks
+    .Filters.Clear
+    .Filters.Add "Excel files", "*.xlsx; *.xls"
+    .Filters.Add "Excel macros", "*.xlsm"
+    .FilterIndex = 1
+    .ButtonName = "Choose this file"
+End With
+
+FileChosen = fd.Show
+
+If FileChosen <> -1 Then                ' if no file selected, set booCancel and exit
+    OpenWorkbook = False
+    booCancel = True
+    Exit Function
+End If
+
+'???
+wksLists.Cells.Clear                ' clear "Lists" sheet
+
+' get data from file
+FileName = fd.SelectedItems(1)
+Set Wb1 = Workbooks.Open(FileName)
+Wb1.Worksheets(1).Copy After:=ThisWorkbook.Worksheets(1)
+
+
+' delete previous "Raw data", if exists
+SheetExistsDelete ("Raw data")
+
+' name new sheet "Raw data"
+ThisWorkbook.Worksheets(2).Name = "Raw data"
+Set wksRawData = ThisWorkbook.Worksheets("Raw data")
+
+strFile = Wb1.Name
+
+Wb1.Close False                     ' close file without prompt
+OpenWorkbook = True
+
+strTitle = wksRawData.Range("A6").Value
+
+' format "Raw data"
+
+' wksRawData.Rows("1:2").EntireRow.Delete  #new_log_format
+
+'  wksRawData.Columns(1).EntireColumn.Delete
+intRows = wksRawData.Range("A1", wksRawData.Range("A500000").End(xlUp)).Rows.Count   ' number of all rows
+
+' remove URLs and submission titles
+'With wksRawData
+'    .Range("D1:D" & intRows).Replace What:=" (http*", Replacement:="", LookAt:=xlPart, _
+'        SearchOrder:=xlByRows, MatchCase:=False, SearchFormat:=False, _
+'        ReplaceFormat:=False
+'    .Range("E1:E" & intRows).Replace What:="User submitted*", Replacement:="User submitted", LookAt:=xlPart, _
+'        SearchOrder:=xlByRows, MatchCase:=False, SearchFormat:=False, _
+'        ReplaceFormat:=False
+'    .Range("E1:E" & intRows).Replace What:="User deleted submission*", Replacement:="User deleted submission", LookAt:=xlPart, _
+'        SearchOrder:=xlByRows, MatchCase:=False, SearchFormat:=False, _
+'        ReplaceFormat:=False
+'
+'End With
+
+' Umkopieren der Werte
+
+    Columns("B:B").Cut
+    Columns("C:C").Insert
+    Columns("D:D").Cut
+    Columns("E:E").Insert
+    Columns("I:I").Cut
+    Columns("B:B").Insert
+    Columns("G:G").Cut
+    Columns("D:D").Insert
+    Columns("F:F").Cut
+    Columns("E:E").Insert
+    
+'Spalten umbenennen (Sprachvarianten beachten beim Weitergeben!)
+wksRawData.Cells(1, 1).Value = "Time"
+wksRawData.Cells(1, 2).Value = "IP address"
+wksRawData.Cells(1, 3).Value = "User full name"
+wksRawData.Cells(1, 4).Value = "Action"
+wksRawData.Cells(1, 5).Value = "Information"
+
+ 
+' parse day, date and time
+Dim x As Integer
+Dim d, t As String
+wksRawData.Columns(1).NumberFormat = "General"
+wksRawData.Columns(7).NumberFormat = "General"
+wksRawData.Columns(8).NumberFormat = "General"
+
+For i = 2 To intRows
+With wksRawData
+    d = wksRawData.Cells(i, 1)
+    x = InStr(d, ",")
+    t = Left(d, x - 1) & " " & Right(d, 5)
+    'm = Mid(d, x + 2, 5)
+    
+    'If (Month(Now) < Month(DateValue(t))) Then
+       't = Left(d, x - 1) & " " & Year(Now) - 1 & " " & Mid(d, x + 2, 5)
+    'End If
+    .Cells(i, 6).Value = Weekday(t)
+    .Cells(i, 7).Value = DateValue(t)
+    .Cells(i, 8).Value = Format(TimeValue(t), "hh:mm:ss am/pm")
+    
+    .Cells(i, 1).Value = Format(t, "yyyy-mm-dd hh:MM:ss")
+    
+    
+End With
+Next i
+
+wksRawData.Range("F1:H1").Value = Array("Day", "Date", "Time")
+
+End Function
+
+
+Sub uniqueLists()
+' list unique values from "Raw data"
+Dim intDateCount As Long
+Dim i As Long
+Dim strDate As String
+
+' Copy unique values to "Lists"
+' users
+With wksRawData
+    .Range("C1", wksRawData.Range("C65536").End(xlUp)).AdvancedFilter _
+        action:=xlFilterCopy, CopyToRange:=wksLists.Range("A1"), Unique:=True
+    ' actions
+    .Range("D1", wksRawData.Range("D65536").End(xlUp)).AdvancedFilter _
+        action:=xlFilterCopy, CopyToRange:=wksLists.Range("D1"), Unique:=True
+    ' pages
+    .Range("E1", wksRawData.Range("E65536").End(xlUp)).AdvancedFilter _
+        action:=xlFilterCopy, CopyToRange:=wksLists.Range("G1"), Unique:=True
+    ' dates
+    .Range("G1", wksRawData.Range("G65536").End(xlUp)).AdvancedFilter _
+        action:=xlFilterCopy, CopyToRange:=wksLists.Range("J1"), Unique:=True
+    ' times
+    .Range("H1", wksRawData.Range("H65536").End(xlUp)).AdvancedFilter _
+        action:=xlFilterCopy, CopyToRange:=wksLists.Range("M1"), Unique:=True
+    ' IP addresses
+    .Range("B1", wksRawData.Range("B65536").End(xlUp)).AdvancedFilter _
+        action:=xlFilterCopy, CopyToRange:=wksLists.Range("P1"), Unique:=True
+End With
+
+' Name ranges
+With ActiveWorkbook.Names
+    .Add Name:="allUserNames", RefersToR1C1:= _
+        wksLists.Range("A2", wksLists.Range("A65536").End(xlUp))
+    .Add Name:="allActions", RefersToR1C1:= _
+        wksLists.Range("D2", wksLists.Range("D65536").End(xlUp))
+    .Add Name:="allPages", RefersToR1C1:= _
+        wksLists.Range("G2", wksLists.Range("G65536").End(xlUp))
+    .Add Name:="allDates", RefersToR1C1:= _
+        wksLists.Range("J2", wksLists.Range("J65536").End(xlUp))
+    .Add Name:="allTimes", RefersToR1C1:= _
+        wksLists.Range("M2", wksLists.Range("M65536").End(xlUp))
+    .Add Name:="allIPs", RefersToR1C1:= _
+        wksLists.Range("P2", wksLists.Range("P65536").End(xlUp))
+    ' total data in "Raw data"
+    .Add Name:="allActivity", RefersToR1C1:= _
+        wksRawData.Range("A2", wksRawData.Range("A65536").End(xlUp))
+
+
+    .Add Name:="FilteredUserNames", RefersToR1C1:= _
+        wksLists.Range("T2:T4")
+    .Add Name:="FilteredActions", RefersToR1C1:= _
+        wksLists.Range("U2:U4")
+    .Add Name:="FilteredPages", RefersToR1C1:= _
+        wksLists.Range("V2:V4")
+    .Add Name:="FilteredDates", RefersToR1C1:= _
+        wksLists.Range("W2:W4")
+
+End With
+
+' sort unique lists
+With wksLists
+    .Range("allUserNames").Sort key1:=wksLists.Range("allUserNames")
+    .Range("allActions").Sort key1:=wksLists.Range("allActions")
+    .Range("allPages").Sort key1:=wksLists.Range("allPages")
+    .Range("allDates").Sort key1:=wksLists.Range("allDates")
+    .Range("allTimes").Sort key1:=wksLists.Range("allTimes")
+    .Range("allIPs").Sort key1:=wksLists.Range("allIPs")
+End With
+End Sub
+
+Public Sub updateTempData()
+' updates used data from selection
+' wksTempData.Cells.Clear
+
+Dim i As Long
+Dim j As Long
+'Dim intUserRows As long
+'Dim intTotalUsers As long
+Dim intTempRow As Long
+Dim intTempProgress As Long
+Dim strName As String
+Dim dblProgressPercent As Double
+Dim dateTemp As Date
+Dim dateTemp2 As Long
+'Dim filterUsers() As Variant
+Dim intTotalRows As Long
+Dim starttime As Date
+Dim endTime As Date
+'Dim rngTemp As Range
+Dim varCell As Variant
+Dim booTempExist As Boolean
+
+
+wksLists.Range("E:E, H:H, K:K, N:N, Q:Q").ClearContents  ' Clear 'selected data' columns
+Call AnalyticsProgressBar.updateProgress(2, "updating data")
+DoEvents
+
+
+' if resetting users
+If booDates = False Then
+    Call filterUsers
+Else
+    Call filterDates
+End If
+' date filtering
+'Dim dDate As Date
+'Dim lDate As Long
+'
+'    dDate = DateSerial(2012, 12, 15)
+'    lDate = dDate
+'    wksRawData.Range("A1").AutoFilter Field:=7, _
+'        Criteria1:=">=" & lDate, Operator:=xlFilterValues
+
+' copy filtered sheet
+
+Call AnalyticsProgressBar.updateProgress(3, "Make unique lists")
+
+' Copy unique values to "Lists"
+' actions
+wksTempData.Range("D1", wksTempData.Range("D65536").End(xlUp)).AdvancedFilter _
+    action:=xlFilterCopy, CopyToRange:=wksLists.Range("E1"), Unique:=True
+' pages
+wksTempData.Range("E1", wksTempData.Range("E65536").End(xlUp)).AdvancedFilter _
+    action:=xlFilterCopy, CopyToRange:=wksLists.Range("H1"), Unique:=True
+'dates
+wksTempData.Range("G1", wksTempData.Range("G65536").End(xlUp)).AdvancedFilter _
+    action:=xlFilterCopy, CopyToRange:=wksLists.Range("K1"), Unique:=True
+' times
+wksTempData.Range("H1", wksTempData.Range("H65536").End(xlUp)).AdvancedFilter _
+    action:=xlFilterCopy, CopyToRange:=wksLists.Range("N1"), Unique:=True
+' IP addresses
+wksTempData.Range("B1", wksTempData.Range("B65536").End(xlUp)).AdvancedFilter _
+    action:=xlFilterCopy, CopyToRange:=wksLists.Range("Q1"), Unique:=True
+
+
+' Name ranges
+With ActiveWorkbook.Names
+    .Add Name:="selectedActions", RefersToR1C1:= _
+        wksLists.Range("E2", wksLists.Range("E65536").End(xlUp))
+    .Add Name:="selectedPages", RefersToR1C1:= _
+        wksLists.Range("H2", wksLists.Range("H65536").End(xlUp))
+    .Add Name:="selectedDates", RefersToR1C1:= _
+        wksLists.Range("K2", wksLists.Range("K65536").End(xlUp))
+    .Add Name:="selectedTimes", RefersToR1C1:= _
+        wksLists.Range("N2", wksLists.Range("N65536").End(xlUp))
+    .Add Name:="selectedIPs", RefersToR1C1:= _
+        wksLists.Range("Q2", wksLists.Range("Q65536").End(xlUp))
+End With
+Call AnalyticsProgressBar.updateProgress(3, "Assign ranges")
+
+Call calcUnique
+    ' number of total activities listed
+i = wksTempData.Range("A1", wksTempData.Range("A65536").End(xlUp)).Rows.Count
+ActiveWorkbook.Names.Add Name:="selectedActivity", RefersToR1C1:=wksTempData.Range("A1:Y" & i)
+        
+Call AnalyticsProgressBar.updateProgress(5, "Sort values")
+DoEvents
+
+' sort
+With wksLists
+    .Range("selectedActions").Sort key1:=wksLists.Range("selectedActions"), order1:=xlAscending
+    .Range("selectedPages").Sort key1:=wksLists.Range("selectedPages"), order1:=xlAscending
+    .Range("selectedDates").Sort key1:=wksLists.Range("selectedDates"), order1:=xlDescending
+    .Range("selectedTimes").Sort key1:=wksLists.Range("selectedTimes"), order1:=xlAscending
+    .Range("selectedIPs").Sort key1:=wksLists.Range("selectedIPs"), order1:=xlAscending
+
+End With
+
+Call sessions
+'Set rngTemp = Nothing
+
+End Sub
+
+Sub filterDates()
+
+Debug.Print ("Start date: " & dteStart)
+Debug.Print ("End date: " & dteEnd)
+
+'must convert data to long-datatype
+wksRawData.Range("$A$1:$H$1240").AutoFilter Field:=7, Criteria1:= _
+        ">=" & CLng(dteStart), Operator:=xlAnd, Criteria2:="<=" & CLng(dteEnd)
+
+wksTempData.Cells.Delete
+wksRawData.AutoFilter.Range.Copy wksTempData.Range("A1")
+
+wksTempData.Range("C1", wksTempData.Range("C65536").End(xlUp)).AdvancedFilter _
+    action:=xlFilterCopy, CopyToRange:=wksLists.Range("B1"), Unique:=True
+ActiveWorkbook.Names.Add Name:="selectedUserNames", RefersToR1C1:= _
+    wksLists.Range("B2", wksLists.Range("B65536").End(xlUp))
+
+End Sub
+
+
+
+Sub filterUsers()
+Dim intUserRows As Long
+Dim intTotalUsers As Long
+Dim rngTemp As Range
+Dim filterUsers() As Variant
+Dim i As Long
+
+' Get number of users
+intTotalUsers = wksLists.Range("allUserNames").Rows.Count
+intUserRows = wksLists.Range("selectedUserNames").Rows.Count
+
+' reset raw data filtering
+'debug.Print ("wksRawData.FilterMode: " & wksRawData.FilterMode)
+'If wksRawData.FilterMode Then
+'    wksRawData.ShowAllData
+'End If
+'
+If intUserRows = intTotalUsers Then                         ' If select all, copy wks
+    wksRawData.Copy After:=ThisWorkbook.Worksheets(1)
+    SheetExistsDelete ("Temp copy")
+    ThisWorkbook.Worksheets("Temp data").Name = "Temp copy"
+    ThisWorkbook.Worksheets(2).Name = "Temp data"
+    Set wksTempData = ThisWorkbook.Worksheets("Temp data")
+Else
+    
+    Set rngTemp = wksLists.Range("selectedUserNames")
+    
+        ' set user filters from "Lists"
+        
+    ReDim filterUsers(0 To intUserRows - 1)
+    For i = 0 To intUserRows - 1
+        filterUsers(i) = rngTemp.Cells(i + 1, 1).Value
+    '    Debug.Print ("filter " & i & ": " & filterUsers(i))
+    Next i
+    wksRawData.Range("A1").AutoFilter Field:=3, _
+        Criteria1:=filterUsers, Operator:=xlFilterValues
+'???
+    wksTempData.Cells.Delete
+    wksRawData.AutoFilter.Range.Copy wksTempData.Range("A1")
+End If
+
+Set rngTemp = Nothing
+End Sub
+
+Sub calcUnique()
+' set up count of unique combinations
+Dim total As Long
+
+wksTempData.Range("I1").Value = "userXaction"
+wksTempData.Range("J1").Value = "userXinfo"
+wksTempData.Range("K1").Value = "userXday"
+wksTempData.Range("L1").Value = "userXdate"
+wksTempData.Range("M1").Value = "userXtime"
+wksTempData.Range("N1").Value = "actionXinfo"
+wksTempData.Range("O1").Value = "actionXday"
+wksTempData.Range("P1").Value = "actionXdate"
+wksTempData.Range("Q1").Value = "actionXtime"
+wksTempData.Range("R1").Value = "infoXday"
+wksTempData.Range("S1").Value = "infoXdate"
+wksTempData.Range("T1").Value = "infoXtime"
+wksTempData.Range("U1").Value = "dayXtime"
+wksTempData.Range("V1").Value = "IPXuser"
+wksTempData.Range("W1").Value = "IPXdate"
+
+total = wksTempData.Range("A2", wksTempData.Range("A65536").End(xlUp)).Rows.Count
+Debug.Print ("Total: " & total)
+
+' user x action
+Call calculation("I", "C", "D", total)
+' user x info (page)
+Call calculation("J", "C", "E", total)
+' user x day
+Call calculation("K", "C", "F", total)
+' user x date
+Call calculation("L", "C", "G", total)
+' user x time
+Call calculation("M", "C", "H", total)
+' action x info
+Call calculation("N", "D", "E", total)
+' action x day
+Call calculation("O", "D", "F", total)
+' action x date
+Call calculation("P", "D", "G", total)
+' action x time
+Call calculation("Q", "D", "H", total)
+' info (page) x day
+Call calculation("R", "E", "F", total)
+' info (page) x date
+Call calculation("S", "E", "G", total)
+' info x time
+Call calculation("T", "E", "H", total)
+' day x time
+Call calculation("U", "F", "H", total)
+' user x IP
+Call calculation("V", "C", "B", total)
+' IP x date
+Call calculation("W", "B", "G", total)
+
+End Sub
+ 
+ 
+Sub calculation(strDest, strField1, strField2, intRows)
+' sort by fields: strField1 and strField2
+' copy fields into arrays
+' run through arrays for unique values
+Dim strTemp As String
+Dim startCalc As Date
+Dim endCalc As Date
+Dim f1() As Variant
+Dim f2() As Variant
+Dim arrResult() As Variant
+Dim rng As Range
+Dim i As Long
+
+
+If booCancel = True Then Exit Sub
+
+'startCalc = TimeValue(Now)
+
+' set up arrays
+ReDim f1(1 To intRows)
+ReDim f2(1 To intRows)
+ReDim arrResult(1 To intRows)
+Call AnalyticsProgressBar.updateProgress(3, "Calculate unique events")
+
+' sort data according to combination fields
+Set rng = wksTempData.Range("A1", "Y" & intRows + 1)
+
+startTimer1 = Timer()
+
+ rng.Sort key1:=rng.Range(strField1 & "1"), order1:=xlAscending, _
+    key2:=rng.Range(strField2 & "1"), order2:=xlAscending, Header:=xlYes
+endTimer1 = Timer()
+Debug.Print ("Calculation sort " & strField1 & ": " & endTimer1 - startTimer1)
+
+
+Call AnalyticsProgressBar.updateProgress(3, "Calculation populate")
+
+' populate arrays
+f1 = wksTempData.Range(strField1 & "2", strField1 & intRows + 1).Value
+f2 = wksTempData.Range(strField2 & "2", strField2 & intRows + 1).Value
+arrResult = wksTempData.Range(strField2 & "2", strField2 & intRows + 1).Value   '??? necessary???
+
+
+For i = 2 To intRows
+'    Debug.Print ("f1(" & i & ": " & f1(i, 1))
+    If f1(i - 1, 1) = f1(i, 1) Then       ' if field 1 same as previous
+        If f2(i - 1, 1) = f2(i, 1) Then
+            arrResult(i, 1) = "0"           ' result "0" if same f2
+        Else
+            arrResult(i, 1) = "1"          ' result "1" if different f2
+        End If
+    Else
+            arrResult(i, 1) = "1"           ' if different f1, mark as unique
+    End If
+Next i
+arrResult(1, 1) = "1"
+
+' copy results to destination
+wksTempData.Range(strDest & "2:" & strDest & intRows + 1) = arrResult
+
+' endCalc = TimeValue(Now)
+Set rng = Nothing
+
+End Sub
+ 
+Function SheetExists(strWSName As String) As Boolean
+'Boolean Function assumed To be False unless Set To True
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(strWSName)
+    If Not ws Is Nothing Then SheetExists = True
+End Function
+
+Sub SheetExistsDelete(strWSName As String)
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(strWSName)
+    Application.DisplayAlerts = False
+    If Not ws Is Nothing Then ThisWorkbook.Worksheets(strWSName).Delete
+    Application.DisplayAlerts = True
+End Sub
+
+Sub makeDateData()
+Dim dMin As Double
+Dim dMax As Double
+Dim i As Long
+Dim arrBounce()
+Dim wksPivots As Worksheet
+
+Set wksPivots = ThisWorkbook.Worksheets("Pivots")
+
+dMax = WorksheetFunction.Max(ThisWorkbook.Worksheets("Lists").Range("selectedDates"))
+dMin = WorksheetFunction.Min(ThisWorkbook.Worksheets("Lists").Range("selectedDates"))
+
+' clear previous dates
+'???
+wksPivots.Range(Range("dateDataStart").Offset(1, 0), Range("dateDataStart").Offset(20000, 6)).Clear
+
+For i = 0 To dMax - dMin
+    wksPivots.Range("dateDataStart").Offset(i, 0).Value = dMin + i
+Next i
+
+' calculate bounce rate
+wksPivots.Range("dateDataStart").Offset(0, 6).Value = _
+    "=COUNTIFS('Temp data'!G:G,Pivots!AD5,'Temp data'!X:X, ""Bounce"")/" & _
+    "(COUNTIFS('Temp data'!G:G,Pivots!AD5,'Temp data'!X:X, ""End session"")+" & _
+    "COUNTIFS('Temp data'!G:G,Pivots!AD5,'Temp data'!X:X, ""Bounce""))"
+    
+'copy date formulae down
+wksPivots.Range(Range("dateDataStart").Offset(0, 1), Range("dateDataStart").Offset(0, 6)).Copy _
+wksPivots.Range(Range("dateDataStart").Offset(1, 1), Range("dateDataStart").Offset(dMax - dMin, 6))
+' ??? copy formulae to static numbers?
+
+' date chart - assign x axis limits
+ThisWorkbook.Worksheets("Start").ChartObjects("chtDateData").Activate
+    ActiveChart.Axes(xlCategory).MinimumScale = dMin - 1
+    ActiveChart.Axes(xlCategory).MaximumScale = dMax + 1
+
+Call dateDynamic.dateDataTV
+
+'Debug.Print ("Min: " & dMin)
+'Debug.Print ("Max: " & dMax)
+End Sub
+
+Sub showIPdata()
+Dim j As Long
+Dim intRows As Long
+Dim constTemp As Double
+Dim arrTemp() As String
+Dim pt As PivotTable
+
+ActiveSheet.Range("S24:U200000").ClearContents
+
+Set pt = ThisWorkbook.Worksheets("Pivots").PivotTables("pvtIP")
+
+intRows = pt.DataBodyRange.Rows.Count
+If intRows > 1 Then
+    pt.PivotFields("IP address").AutoSort xlDescending, "Sum of IPXuser"
+    pt.RowRange.Offset(1, 0).Copy Destination:=ThisWorkbook.Worksheets("Start").Range("S24")
+    pt.DataBodyRange.Copy Destination:=ThisWorkbook.Worksheets("Start").Range("T24")
+    
+    constTemp = 35 / Application.WorksheetFunction.Max(pt.DataBodyRange)
+    
+    ReDim arrTemp(1 To intRows)
+    
+    For j = 24 To intRows + 23
+        arrTemp(j - 23) = String(ActiveSheet.Range("T" & j).Value * constTemp, "|")
+    Next j
+    ActiveSheet.Range("U24:U" & intRows + 23) = Application.Transpose(arrTemp)
+End If
+    Range("S23:U200000").Interior.PatternColorIndex = xlAutomatic
+
+Set pt = Nothing
+End Sub
+Sub defaultFilters()
+    ActiveSheet.Shapes.Range(Array("cboUserFilter")).Select
+        Selection.ListFillRange = "selectedUserNames"
+    ActiveSheet.Shapes.Range(Array("cboActionFilter")).Select
+        Selection.ListFillRange = "selectedActions"
+    ActiveSheet.Shapes.Range(Array("cboPageFilter")).Select
+        Selection.ListFillRange = "selectedPages"
+    ActiveSheet.Shapes.Range(Array("cboIPFilter")).Select
+        Selection.ListFillRange = "selectedIPs"
+    ActiveSheet.Range("A16").Select
+End Sub
+
+
+
+
+' ============  SESSIONS   ============
+
+Sub sessions()
+Dim activity()
+Dim intTime()       ' time (in hours) since last activity
+Dim strSummary()
+Dim intRows As Long
+Dim i As Long
+Dim j As Long
+Dim starttime As Long
+Dim endTime As Long
+Dim wksTemp As Worksheet
+Dim dblMins As Double
+Dim timeout As Double
+
+timeout = ThisWorkbook.Worksheets("Pivots").Range("timeout").Value
+
+' sort by date, then name
+
+Set wksTemp = ThisWorkbook.Worksheets("Temp data")
+wksTempData.Range("X1").Value = "Session"
+wksTempData.Range("Y1").Value = "Session length (min)"
+
+
+intRows = wksTemp.Range("A1").CurrentRegion.Rows.Count - 1
+
+wksTemp.Range("A1").CurrentRegion.Sort key1:=wksTemp.Range("C1:C" & intRows), order1:=xlAscending, _
+    key2:=wksTemp.Range("A1:A" & intRows), order2:=xlAscending, Header:=xlYes
+
+activity = wksTemp.Range("A2:C" & intRows + 1).Value
+strSummary = wksTemp.Range("Z2:Z" & intRows + 1).Value
+intTime = strSummary        ' prime array for data
+starttime = Timer()         ' prime array for data
+
+' check user and note time in hours
+For i = 2 To intRows - 1
+    If activity(i, 3) = activity(i - 1, 3) Then         ' if = prev user
+        intTime(i, 1) = DateDiff("n", activity(i - 1, 1), activity(i, 1))
+        If activity(i, 3) = activity(i + 1, 3) Then         ' if = next user
+            If DateDiff("n", activity(i, 1), activity(i + 1, 1)) < timeout Then   'if next <90min
+                If intTime(i, 1) < timeout Then                          ' if prev < 90min, CONTINUE
+                    strSummary(i, 1) = "Continue"
+                Else                                                ' if prev >= 90min, START
+                    strSummary(i, 1) = "Start session"
+                End If
+            Else                                                ' if next >= 90min
+                If intTime(i, 1) < timeout Then                          ' if prev < 90min, END
+                    strSummary(i, 1) = "End session"
+                Else                                                ' if prev >= 90min, BOUNCE
+                    strSummary(i, 1) = "Bounce"
+                End If
+            End If
+        Else                                                ' if <> next user
+            If intTime(i, 1) < timeout Then                          ' if prev < 90min, END
+                strSummary(i, 1) = "End session"
+            Else                                                ' if prev >= 90min, BOUNCE
+                strSummary(i, 1) = "Bounce"
+            End If
+        End If
+    Else                                                'if <> prev user
+        If activity(i, 3) = activity(i + 1, 3) Then         ' if = next user
+            If DateDiff("n", activity(i, 1), activity(i + 1, 1)) < timeout Then   'if next <90min, START
+                strSummary(i, 1) = "Start session"
+            Else                                                ' if next >= 90min, BOUNCE
+                strSummary(i, 1) = "Bounce"
+            End If
+        Else                                                ' if <> next user, BOUNCE
+                strSummary(i, 1) = "Bounce"
+        End If
+    End If
+Next i
+
+intTime(1, 1) = 0
+Select Case (strSummary(2, 1))
+    Case "Start session":
+        strSummary(1, 1) = "Bounce"
+    Case "End session":
+        strSummary(1, 1) = "Start session"
+    Case "Continue":
+        strSummary(1, 1) = "Start session"
+    Case "Bounce":
+        strSummary(1, 1) = "Bounce"
+End Select
+
+Select Case (strSummary(intRows - 1, 1))
+    Case "Start session":
+        strSummary(intRows, 1) = "End session"
+        intTime(intRows, 1) = DateDiff("n", activity(intRows - 1, 1), activity(intRows, 1))
+
+    Case "End session":
+        strSummary(intRows, 1) = "Bounce"
+    Case "Continue":
+        strSummary(intRows, 1) = "End session"
+        intTime(intRows, 1) = DateDiff("n", activity(intRows - 1, 1), activity(intRows, 1))
+
+    Case "Bounce":
+        strSummary(intRows, 1) = "Bounce"
+End Select
+
+endTime = Timer()
+Debug.Print ("Time to IF: " & endTime - starttime)
+
+wksTemp.Range("X2:X" & intRows + 1).Value = strSummary
+
+' reset intTime values
+intTime = wksTemp.Range("BB2:BB" & intRows + 1).Value
+' find length of sessions for each "end session"
+For i = 2 To intRows
+If strSummary(i, 1) = "Start session" Then
+    For j = i + 1 To intRows
+        If strSummary(j, 1) = "End session" Then
+            intTime(j, 1) = DateDiff("s", activity(i, 1), activity(j, 1)) / 60
+            i = j
+            j = intRows + 1
+        End If
+    Next j
+    
+End If
+Next i
+wksTemp.Range("Y2:Y" & intRows + 1).Value = intTime
+'ActiveSheet.Range("D10").Value = "=AVERAGE('Temp data'!Y:Y)"
+'ActiveSheet.Range("D10").Value = Format(ActiveSheet.Range("D10").Value, "#.0") & " mins"
+
+dblMins = Format(Application.WorksheetFunction.Median(intTime), "#.0")
+ThisWorkbook.Worksheets("Start").Range("D10").Value = dblMins & " mins"
+Debug.Print ("AVE SESSION: " & Format(Application.WorksheetFunction.Average(intTime), "#.0"))
+Set wksTemp = Nothing
+End Sub
+
+
